@@ -90,20 +90,20 @@ struct ft5x06 {
     struct regulator *vtp;
 };
 
+typedef struct ft506_touch_data {
+    unsigned char x_h;
+    unsigned char x_l;
+    unsigned char y_h;
+    unsigned char y_l;
+    unsigned char res1;
+    unsigned char res2;
+} point_data;
+
 typedef struct ft506{
     unsigned char mode;
     unsigned char gesture_id;
     unsigned char status;
-    unsigned char x1_h;
-    unsigned char x1_l;
-    unsigned char y1_h;
-    unsigned char y1_l;
-    unsigned char res1;
-    unsigned char res2;
-    unsigned char x2_h;
-    unsigned char x2_l;
-    unsigned char y2_h;
-    unsigned char y2_l;
+    point_data points[FT_NUM_MT_TCH_ID];
 } ft506_data;
 
 
@@ -236,10 +236,7 @@ void ft5x06_xy_worker(struct work_struct *work)
     struct ft5x06 *ts = container_of(work, struct ft5x06, work);
     int retval = 0;
     ft506_data tch_data;
-    u16 x1 = 0;
-    u16 y1 = 0;
-    u16 x2 = 0;
-    u16 y2 = 0;
+    u8 _id;
     u8 id, tilt, rev_x, rev_y;
     u8 i, loc;
     u8 prv_tch = 0;     /* number of previous touches */
@@ -260,8 +257,6 @@ void ft5x06_xy_worker(struct work_struct *work)
     u8 st_z1;
     u16 st_x2, st_y2;
     u8 st_z2;
-    u8 id_1 = 0;
-    u8 id_2 = 0;
     static u8 prev_gest = 0;
     static u8 gest_count = 0;
 
@@ -273,33 +268,14 @@ void ft5x06_xy_worker(struct work_struct *work)
 
     g_xy_data.gest_id = 0;
 
-    retval = i2c_smbus_read_i2c_block_data(ts->client, FT5x06_WMREG_DEVICE_MODE, 0x0D, (u8 *)&tch_data);
+    retval = i2c_smbus_read_i2c_block_data(ts->client, FT5x06_WMREG_DEVICE_MODE, sizeof(ft506_data), (u8 *)&tch_data);
     if (retval < 0)
     {
         printk(KERN_ERR "%s() - ERROR: Could not read from the Touch Panel registers.\n", __FUNCTION__);
     }
     else
     {
-        y1 = GET_COORDINATE(tch_data.x1_l,tch_data.x1_h);
-        y2 = GET_COORDINATE(tch_data.x2_l,tch_data.x2_h);
-        x1 = GET_COORDINATE(tch_data.y1_l,tch_data.y1_h);
-        x2 = GET_COORDINATE(tch_data.y2_l,tch_data.y2_h);
-
-        id_1 = (tch_data.y1_h>>4);
-        id_2 = (tch_data.y2_h>>4);
-
         g_xy_data.gest_id = tch_data.gesture_id;
-
-        if (x1 == 4095)
-        {
-            printk(KERN_INFO "%s() - bad data, treat as pen up.\n", __FUNCTION__);
-            tch_data.status = 0;
-            g_xy_data.gest_id = 0;
-            x1 = 0;
-            x2 = 0;
-            y1 = 0;
-            y2 = 0;
-        }
     }
 
     cur_tch = tch_data.status;
@@ -391,130 +367,31 @@ void ft5x06_xy_worker(struct work_struct *work)
     rev_y = true;
 
     /* process the touches */
-    switch (cur_tch)
+    u8 counter = 0;
+    for(id = 0; id < FT_NUM_MT_TCH_ID, counter < cur_tch; id++)
     {
-        case 2:
+        _id = (tch_data.points[id].y_h>>4);
+        cur_mt_pos[id][FT_XPOS] = GET_COORDINATE(tch_data.points[id].x_l, tch_data.points[id].x_h);
+        cur_mt_pos[id][FT_YPOS] = GET_COORDINATE(tch_data.points[id].y_l, tch_data.points[id].y_h);
+        if (tilt)
         {
-            g_xy_data.x2 = x2;
-            g_xy_data.y2 = y2;
-
-            if (tilt)
-            {
-                FLIP_XY(g_xy_data.x2, g_xy_data.y2);
-            }
-
-            if (rev_x)
-            {
-                g_xy_data.x2 = INVERT_X(g_xy_data.x2, ts->platform_data->maxx);
-            }
-
-            if (rev_y)
-            {
-                g_xy_data.y2 = INVERT_X(g_xy_data.y2, ts->platform_data->maxy-1);
-            }
-
-            id = id_2;
-
-            if (ts->platform_data->use_trk_id)
-            {
-                cur_mt_pos[FT_MT_TCH2_IDX][FT_XPOS] = g_xy_data.x2;
-                cur_mt_pos[FT_MT_TCH2_IDX][FT_YPOS] = g_xy_data.y2;
-            }
-            else
-            {
-                cur_mt_pos[id][FT_XPOS] = g_xy_data.x2;
-                cur_mt_pos[id][FT_YPOS] = g_xy_data.y2;
-                cur_mt_z[id] = FT_MAXZ;
-            }
-
-            cur_mt_tch[FT_MT_TCH2_IDX] = id;
-            cur_trk[id] = FT_TCH;
-
-            if (ts->prv_st_tch[FT_ST_FNGR1_IDX] < FT_NUM_TRK_ID)
-            {
-                if (ts->prv_st_tch[FT_ST_FNGR1_IDX] == id)
-                {
-                    st_x1 = g_xy_data.x2;
-                    st_y1 = g_xy_data.y2;
-                    st_z1 = FT_MAXZ;
-
-                    cur_st_tch[FT_ST_FNGR1_IDX] = id;
-                }
-                else if (ts->prv_st_tch[FT_ST_FNGR2_IDX] == id)
-                {
-                    st_x2 = g_xy_data.x2;
-                    st_y2 = g_xy_data.y2;
-                    st_z2 = FT_MAXZ;
-
-                    cur_st_tch[FT_ST_FNGR2_IDX] = id;
-                }
-            }
-
-            /* do not break */
+            FLIP_XY(cur_mt_pos[id][FT_XPOS], cur_mt_pos[id][FT_YPOS]);
         }
 
-        case 1:
+        if (rev_x)
         {
-            g_xy_data.x1 = x1;
-            g_xy_data.y1 = y1;
-
-            if (tilt)
-            {
-                FLIP_XY(g_xy_data.x1, g_xy_data.y1);
-            }
-
-            if (rev_x)
-            {
-                g_xy_data.x1 = INVERT_X(g_xy_data.x1, ts->platform_data->maxx);
-            }
-
-            if (rev_y)
-            {
-                g_xy_data.y1 = INVERT_X(g_xy_data.y1, ts->platform_data->maxy-1);
-            }
-
-            id = id_1;
-
-            if (ts->platform_data->use_trk_id)
-            {
-                cur_mt_pos[FT_MT_TCH1_IDX][FT_XPOS] = g_xy_data.x1;
-                cur_mt_pos[FT_MT_TCH1_IDX][FT_YPOS] = g_xy_data.y1;
-
-            }
-            else
-            {
-                cur_mt_pos[id][FT_XPOS] = g_xy_data.x1;
-                cur_mt_pos[id][FT_YPOS] = g_xy_data.y1;
-            }
-
-            cur_mt_tch[FT_MT_TCH1_IDX] = id;
-            cur_trk[id] = FT_TCH;
-
-            if (ts->prv_st_tch[FT_ST_FNGR1_IDX] < FT_NUM_TRK_ID)
-            {
-                if (ts->prv_st_tch[FT_ST_FNGR1_IDX] == id)
-                {
-                    st_x1 = g_xy_data.x1;
-                    st_y1 = g_xy_data.y1;
-                    st_z1 = FT_MAXZ;
-
-                    cur_st_tch[FT_ST_FNGR1_IDX] = id;
-                }
-                else if (ts->prv_st_tch[FT_ST_FNGR2_IDX] == id)
-                {
-                    st_x2 = g_xy_data.x1;
-                    st_y2 = g_xy_data.y1;
-                    st_z2 = FT_MAXZ;
-
-                    cur_st_tch[FT_ST_FNGR2_IDX] = id;
-                }
-            }
-            break;
+            cur_mt_pos[id][FT_XPOS] = INVERT_X(cur_mt_pos[id][FT_XPOS], ts->platform_data->maxx);
         }
 
-        case 0:
-        default:
-            break;
+        if (rev_y)
+        {
+            cur_mt_pos[id][FT_YPOS] = INVERT_Y(cur_mt_pos[id][FT_YPOS], ts->platform_data->maxy-1);
+        }
+        if (cur_mt_pos[id][FT_XPOS] != 4095) {
+            cur_trk[_id] = FT_TCH;
+            cur_mt_tch[id] = _id;
+            ++counter;
+        }
     }
 
     /* handle Multi-touch signals */
